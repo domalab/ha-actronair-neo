@@ -1,4 +1,4 @@
-# coordinator.py
+# ActronAir Neo Coordinator
 
 from datetime import timedelta
 from typing import Any, Dict, Optional, List
@@ -15,10 +15,18 @@ from .const import DOMAIN, MAX_ZONES
 _LOGGER = logging.getLogger(__name__)
 
 class ActronDataCoordinator(DataUpdateCoordinator):
-    """Class to manage fetching Actron Air Neo data."""
+    """Class to manage fetching ActronAir Neo data."""
 
-    def __init__(self, hass: HomeAssistant, api: ActronApi, device_id: str, update_interval: int):
-        """Initialize the data coordinator."""
+    def __init__(self, hass: HomeAssistant, api: ActronApi, device_id: str, update_interval: int, enable_zone_control: bool):
+        """Initialize the data coordinator.
+        
+        Args:
+            hass: HomeAssistant instance
+            api: ActronApi instance for API communication
+            device_id: Unique identifier for the device
+            update_interval: Update interval in seconds
+            enable_zone_control: Whether zone control is enabled
+        """
         super().__init__(
             hass,
             _LOGGER,
@@ -27,7 +35,13 @@ class ActronDataCoordinator(DataUpdateCoordinator):
         )
         self.api = api
         self.device_id = device_id
+        self.enable_zone_control = enable_zone_control
         self.last_data = None
+
+    async def set_enable_zone_control(self, enable: bool):
+        """Update the enable_zone_control status."""
+        self.enable_zone_control = enable
+        await self.async_request_refresh()
 
     async def _async_update_data(self) -> Dict[str, Any]:
         """Fetch data from API endpoint."""
@@ -76,12 +90,10 @@ class ActronDataCoordinator(DataUpdateCoordinator):
                     "temp_setpoint_heat": user_aircon_settings.get("TemperatureSetpoint_Heat_oC"),
                     "indoor_temp": master_info.get("LiveTemp_oC"),
                     "indoor_humidity": master_info.get("LiveHumidity_pc"),
-                    "wall_temp": master_info.get("LiveWallTemp_oC"),
                     "compressor_state": live_aircon.get("CompressorMode", "OFF"),
                     "EnabledZones": user_aircon_settings.get("EnabledZones", []),
                     "away_mode": user_aircon_settings.get("AwayMode", False),
                     "quiet_mode": user_aircon_settings.get("QuietMode", False),
-                    "continuous_fan": user_aircon_settings.get("FanMode", "").endswith("-CONT"),
                     "model": aircon_system.get("MasterWCModel"),
                     "serial_number": aircon_system.get("MasterSerial"),
                     "firmware_version": aircon_system.get("MasterWCFirmwareVersion"),
@@ -99,8 +111,6 @@ class ActronDataCoordinator(DataUpdateCoordinator):
                         "temp": zone.get("LiveTemp_oC"),
                         "humidity": zone.get("LiveHumidity_pc"),
                         "is_enabled": parsed_data["main"]["EnabledZones"][i] if i < len(parsed_data["main"]["EnabledZones"]) else False,
-                        "temp_setpoint_cool": zone.get("TemperatureSetpoint_Cool_oC"),
-                        "temp_setpoint_heat": zone.get("TemperatureSetpoint_Heat_oC"),
                     }
 
             return parsed_data
@@ -112,11 +122,11 @@ class ActronDataCoordinator(DataUpdateCoordinator):
     async def set_hvac_mode(self, hvac_mode: str) -> None:
         """Set HVAC mode."""
         try:
-            command = self.api.create_command("ON" if hvac_mode != HVACMode.OFF else "OFF")
-            await self.api.send_command(self.device_id, command)
-            if hvac_mode != HVACMode.OFF:
+            if hvac_mode == HVACMode.OFF:
+                command = self.api.create_command("OFF")
+            else:
                 command = self.api.create_command("CLIMATE_MODE", mode=hvac_mode)
-                await self.api.send_command(self.device_id, command)
+            await self.api.send_command(self.device_id, command)
             await self.async_request_refresh()
         except Exception as err:
             _LOGGER.error(f"Failed to set HVAC mode to {hvac_mode}: {err}")
@@ -132,40 +142,87 @@ class ActronDataCoordinator(DataUpdateCoordinator):
             _LOGGER.error(f"Failed to set {'cooling' if is_cooling else 'heating'} temperature to {temperature}: {err}")
             raise
 
-    async def set_fan_mode(self, fan_mode: str) -> None:
+    async def set_fan_mode(self, fan_mode: str, continuous: bool = False) -> None:
         """Set fan mode."""
         try:
-            command = self.api.create_command("FAN_MODE", mode=fan_mode)
-            await self.api.send_command(self.device_id, command)
+            await self.api.set_fan_mode(fan_mode, continuous)
             await self.async_request_refresh()
         except Exception as err:
-            _LOGGER.error(f"Failed to set fan mode to {fan_mode}: {err}")
+            _LOGGER.error(f"Failed to set fan mode to {fan_mode} (continuous: {continuous}): {err}")
             raise
 
-    async def set_zone_state(self, zone_index: int, enable: bool) -> None:
+    async def set_zone_temperature(self, zone_id: str, temperature: float, temp_key: str) -> None:
+        """Set temperature for a specific zone with comprehensive validation.
+        
+        Args:
+            zone_id: Identifier for the zone
+            temperature: Target temperature
+            temp_key: Temperature key for heating or cooling
+            
+        Raises:
+            ValueError: If zone control is disabled or validation fails
+            ApiError: If API communication fails
+        """
+        if not self.enable_zone_control:
+            _LOGGER.error("Attempted to set zone temperature while zone control is disabled")
+            raise ValueError("Zone control is not enabled")
+
+        if not self.last_data:
+            _LOGGER.error("No data available for zone temperature control")
+            raise ValueError("No system data available")
+
+        zones_data = self.last_data.get("zones", {})
+        zone_data = zones_data.get(zone_id)
+        
+        if not zone_data:
+            _LOGGER.error(f"Zone {zone_id} not found in available zones: {list(zones_data.keys())}")
+            raise ValueError(f"Zone {zone_id} not found")
+
+        if not zone_data.get("is_enabled", False):
+            _LOGGER.error(f"Cannot set temperature for disabled zone {zone_id}")
+            raise ValueError(f"Zone {zone_id} is not enabled")
+
+        try:
+            zone_index = int(zone_id.split('_')[1]) - 1
+            command = self.api.create_command("SET_ZONE_TEMP", 
+                                        zone=zone_index, 
+                                        temp=temperature, 
+                                        temp_key=temp_key)
+            await self.api.send_command(self.device_id, command)
+            _LOGGER.info(f"Successfully set zone {zone_id} temperature to {temperature}")
+            await self.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error(f"Failed to set zone {zone_id} temperature to {temperature}: {err}")
+            raise
+
+    async def set_zone_state(self, zone_id: str, enable: bool) -> None:
         """Set zone state."""
         try:
-            current_zone_status = self.last_data['main']['EnabledZones']
-            modified_statuses = self._modified_zone_statuses(enable, zone_index, current_zone_status)
-            command = self.api.create_command("ZONE_ENABLE" if enable else "ZONE_DISABLE", zone_index=zone_index)
+            zone_index = int(zone_id.split('_')[1]) - 1  # Convert zone_id to zero-based index
+            current_zone_status = self.last_data["main"]["EnabledZones"]
+            modified_statuses = current_zone_status.copy()
+            modified_statuses[zone_index] = enable
+            command = self.api.create_command("SET_ZONE_STATE", zones=modified_statuses)
             await self.api.send_command(self.device_id, command)
-            self.last_data['main']['EnabledZones'] = modified_statuses
-            self.last_data['zones'][f'zone_{zone_index+1}']['is_enabled'] = enable
             await self.async_request_refresh()
         except Exception as err:
-            _LOGGER.error(f"Failed to set zone {zone_index + 1} state to {'on' if enable else 'off'}: {err}")
+            _LOGGER.error(f"Failed to set zone {zone_id} state to {'on' if enable else 'off'}: {err}")
             raise
 
-    def _modified_zone_statuses(self, status: bool, zone_index: int, current_zone_status: List[bool]) -> List[bool]:
-        modified_statuses = current_zone_status[:]
-        modified_statuses[zone_index] = status
-        return modified_statuses
+    async def set_climate_mode(self, mode: str) -> None:
+        """Set climate mode for all zones."""
+        try:
+            command = self.api.create_command("CLIMATE_MODE", mode=mode)
+            await self.api.send_command(self.device_id, command)
+            await self.async_request_refresh()
+        except Exception as err:
+            _LOGGER.error(f"Failed to set climate mode to {mode}: {err}")
+            raise
 
     async def set_away_mode(self, state: bool) -> None:
         """Set away mode."""
         try:
-            command = self.api.create_command("AWAY_MODE", state=state)
-            await self.api.send_command(self.device_id, command)
+            await self.api.set_away_mode(state)
             await self.async_request_refresh()
         except Exception as err:
             _LOGGER.error(f"Failed to set away mode to {state}: {err}")
@@ -174,22 +231,10 @@ class ActronDataCoordinator(DataUpdateCoordinator):
     async def set_quiet_mode(self, state: bool) -> None:
         """Set quiet mode."""
         try:
-            command = self.api.create_command("QUIET_MODE", state=state)
-            await self.api.send_command(self.device_id, command)
+            await self.api.set_quiet_mode(state)
             await self.async_request_refresh()
         except Exception as err:
             _LOGGER.error(f"Failed to set quiet mode to {state}: {err}")
-            raise
-
-    async def set_continuous_fan(self, state: bool) -> None:
-        """Set continuous fan."""
-        try:
-            current_mode = self.last_data['main']['fan_mode'].split('-')[0] if self.last_data else 'LOW'
-            command = self.api.create_command("CONTINUOUS_FAN", state=state, current_mode=current_mode)
-            await self.api.send_command(self.device_id, command)
-            await self.async_request_refresh()
-        except Exception as err:
-            _LOGGER.error(f"Failed to set continuous fan to {state}: {err}")
             raise
 
     async def force_update(self) -> None:

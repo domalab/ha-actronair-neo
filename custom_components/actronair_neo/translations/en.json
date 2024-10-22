@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to ActronAir Neo",
+        "description": "Please enter your ActronAir Neo credentials.",
+        "data": {
+          "username": "Username",
+          "password": "Password",
+          "refresh_interval": "Refresh Interval (seconds)",
+          "enable_zone_control": "Enable Individual Zone Control"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid authentication",
+      "cannot_connect": "Failed to connect",
+      "no_devices": "No devices found on account",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "Device is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ActronAir Neo Options",
+        "data": {
+          "refresh_interval": "Refresh Interval (seconds)",
+          "enable_zone_control": "Enable Individual Zone Control"
+        }
+      }
+    }
+  }
+}

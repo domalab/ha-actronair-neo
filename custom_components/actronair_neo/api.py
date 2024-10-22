@@ -1,5 +1,6 @@
-# api.py
+# ActronAir Neo API
 
+import os
 import aiohttp
 import aiofiles
 import asyncio
@@ -52,13 +53,14 @@ class RateLimiter:
         self.semaphore.release()
 
 class ActronApi:
-    def __init__(self, username: str, password: str, session: aiohttp.ClientSession, storage_path: str):
+    def __init__(self, username: str, password: str, session: aiohttp.ClientSession, config_path: str):
         """Initialize the ActronApi class."""
         self.username = username
         self.password = password
         self.session = session
-        self.storage_path = storage_path
-        self.refresh_token = None
+        config_path = '/config' # Set to Home Assistant's config directory
+        self.token_file = os.path.join(config_path, "actron_token.json")
+        self.refresh_token_value = None
         self.access_token = None
         self.token_expires_at = None
         self.rate_limiter = RateLimiter(MAX_REQUESTS_PER_MINUTE)
@@ -70,16 +72,16 @@ class ActronApi:
 
     async def load_tokens(self):
         """Load authentication tokens from storage."""
-        token_file = f"{self.storage_path}/tokens.json"
         try:
-            async with aiofiles.open(token_file, mode='r') as f:
-                data = json.loads(await f.read())
-                self.refresh_token = data.get("refresh_token")
-                self.access_token = data.get("access_token")
-                self.token_expires_at = datetime.fromisoformat(data.get("expires_at", "2000-01-01"))
-            _LOGGER.debug("Tokens loaded successfully")
-        except FileNotFoundError:
-            _LOGGER.debug("No token file found, will authenticate from scratch")
+            if os.path.exists(self.token_file):
+                async with aiofiles.open(self.token_file, mode='r') as f:
+                    data = json.loads(await f.read())
+                    self.refresh_token_value = data.get("refresh_token")
+                    self.access_token = data.get("access_token")
+                    self.token_expires_at = datetime.fromisoformat(data.get("expires_at", "2000-01-01"))
+                _LOGGER.debug("Tokens loaded successfully")
+            else:
+                _LOGGER.debug("No token file found, will authenticate from scratch")
         except json.JSONDecodeError:
             _LOGGER.warning("Token file is corrupted, will authenticate from scratch")
         except Exception as e:
@@ -87,11 +89,10 @@ class ActronApi:
 
     async def save_tokens(self):
         """Save authentication tokens to storage."""
-        token_file = f"{self.storage_path}/tokens.json"
         try:
-            async with aiofiles.open(token_file, mode='w') as f:
+            async with aiofiles.open(self.token_file, mode='w') as f:
                 await f.write(json.dumps({
-                    "refresh_token": self.refresh_token,
+                    "refresh_token": self.refresh_token_value,
                     "access_token": self.access_token,
                     "expires_at": self.token_expires_at.isoformat() if self.token_expires_at else None
                 }))
@@ -99,11 +100,20 @@ class ActronApi:
         except Exception as e:
             _LOGGER.error(f"Error saving tokens: {e}")
 
+    async def clear_tokens(self):
+        """Clear stored tokens when they become invalid."""
+        self.refresh_token_value = None
+        self.access_token = None
+        self.token_expires_at = None
+        if os.path.exists(self.token_file):
+            os.remove(self.token_file)
+        _LOGGER.info("Cleared stored tokens due to authentication failure")
+
     async def authenticate(self):
         """Authenticate and get the token."""
         _LOGGER.debug("Starting authentication process")
         try:
-            if not self.refresh_token:
+            if not self.refresh_token_value:
                 _LOGGER.debug("No refresh token, getting a new one")
                 await self._get_refresh_token()
             await self._get_access_token()
@@ -125,16 +135,16 @@ class ActronApi:
             "deviceUniqueIdentifier": "HA-ActronNeo"
         }
         try:
-            _LOGGER.debug("Requesting refresh token")
+            _LOGGER.debug("Requesting new refresh token")
             response = await self._make_request("POST", url, headers=headers, data=data, auth_required=False)
-            self.refresh_token = response.get("pairingToken")
-            if not self.refresh_token:
-                raise AuthenticationError("No refresh token received")
+            self.refresh_token_value = response.get("pairingToken")
+            if not self.refresh_token_value:
+                raise AuthenticationError("No refresh token received in response")
             await self.save_tokens()
-            _LOGGER.debug("Refresh token obtained and saved")
+            _LOGGER.info("New refresh token obtained and saved")
         except Exception as e:
-            _LOGGER.error(f"Failed to get refresh token: {str(e)}")
-            raise AuthenticationError(f"Failed to get refresh token: {str(e)}")
+            _LOGGER.error(f"Failed to get new refresh token: {str(e)}")
+            raise AuthenticationError(f"Failed to get new refresh token: {str(e)}")
 
     async def _get_access_token(self):
         """Get access token using refresh token."""
@@ -142,69 +152,84 @@ class ActronApi:
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         data = {
             "grant_type": "refresh_token",
-            "refresh_token": self.refresh_token,
+            "refresh_token": self.refresh_token_value,
             "client_id": "app"
         }
         try:
-            _LOGGER.debug("Requesting access token")
+            _LOGGER.debug("Requesting new access token")
             response = await self._make_request("POST", url, headers=headers, data=data, auth_required=False)
             self.access_token = response.get("access_token")
             expires_in = response.get("expires_in", 3600)
             self.token_expires_at = datetime.now() + timedelta(seconds=expires_in - 300)  # Refresh 5 minutes early
             if not self.access_token:
-                raise AuthenticationError("No access token received")
+                raise AuthenticationError("No access token received in response")
             await self.save_tokens()
-            _LOGGER.debug("Access token obtained and saved")
+            _LOGGER.info("New access token obtained and saved")
         except Exception as e:
-            _LOGGER.error(f"Failed to get access token: {str(e)}")
-            raise AuthenticationError(f"Failed to get access token: {str(e)}")
+            _LOGGER.error(f"Failed to get new access token: {str(e)}")
+            raise AuthenticationError(f"Failed to get new access token: {str(e)}")
+
+    MAX_REFRESH_RETRIES = 3
+    REFRESH_RETRY_DELAY = 5  # seconds
+
+    async def refresh_access_token(self):
+        for attempt in range(self.MAX_REFRESH_RETRIES):
+            try:
+                await self._get_access_token()
+                return
+            except AuthenticationError as e:
+                _LOGGER.warning(f"Token refresh failed (attempt {attempt + 1}/{self.MAX_REFRESH_RETRIES}): {e}")
+                if attempt < self.MAX_REFRESH_RETRIES - 1:
+                    await asyncio.sleep(self.REFRESH_RETRY_DELAY * (2 ** attempt))  # Exponential backoff
+                else:
+                    _LOGGER.error("All token refresh attempts failed. Attempting to re-authenticate.")
+                    await self.clear_tokens()
+                    try:
+                        await self._get_refresh_token()
+                        await self._get_access_token()
+                        return
+                    except AuthenticationError as auth_err:
+                        _LOGGER.error(f"Re-authentication failed: {auth_err}")
+                        raise
+        raise AuthenticationError("Failed to refresh token and re-authentication failed")
 
     async def _make_request(self, method: str, url: str, auth_required: bool = True, **kwargs) -> Dict[str, Any]:
         """Make an API request with rate limiting and error handling."""
         async with self.rate_limiter:
-            retries = MAX_RETRIES
-            for attempt in range(retries):
+            for attempt in range(MAX_RETRIES):
                 try:
                     headers = kwargs.get('headers', {})
                     if auth_required:
                         if not self.access_token or datetime.now() >= self.token_expires_at:
-                            await self._get_access_token()
+                            await self.refresh_access_token()
                         headers['Authorization'] = f'Bearer {self.access_token}'
                     kwargs['headers'] = headers
 
                     _LOGGER.debug(f"Making {method} request to: {url}")
+                    _LOGGER.debug(f"Request payload: {kwargs.get('json')}")  # Log the payload
                     async with self.session.request(method, url, timeout=API_TIMEOUT, **kwargs) as response:
                         if response.status == 200:
                             self.error_count = 0
                             self.last_successful_request = datetime.now()
                             return await response.json()
                         elif response.status == 401 and auth_required:
-                            _LOGGER.warning("Token expired, re-authenticating...")
-                            await self.authenticate()
+                            _LOGGER.warning("Token expired, refreshing...")
+                            await self.refresh_access_token()
                             continue
-                        elif response.status == 429:
-                            raise RateLimitError("Rate limit exceeded")
                         else:
                             text = await response.text()
                             _LOGGER.error(f"API request failed: {response.status}, {text}")
                             self.error_count += 1
                             raise ApiError(f"API request failed: {response.status}, {text}", status_code=response.status)
 
-                except aiohttp.ClientError as err:
-                    _LOGGER.error(f"Network error on attempt {attempt + 1}: {err}")
+                except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+                    _LOGGER.error(f"Request error on attempt {attempt + 1}: {err}")
                     self.error_count += 1
-                    if attempt == retries - 1:
-                        raise ApiError(f"Network error after {retries} attempts: {err}")
+                    if attempt == MAX_RETRIES - 1:
+                        raise ApiError(f"Request failed after {MAX_RETRIES} attempts: {err}")
                     await asyncio.sleep(5 * (2 ** attempt))  # Exponential backoff
 
-                except asyncio.TimeoutError:
-                    _LOGGER.error(f"Timeout error on attempt {attempt + 1}")
-                    self.error_count += 1
-                    if attempt == retries - 1:
-                        raise ApiError(f"Timeout error after {retries} attempts")
-                    await asyncio.sleep(5 * (2 ** attempt))  # Exponential backoff
-
-        raise ApiError(f"Failed to make request after {retries} attempts")
+        raise ApiError(f"Failed to make request after {MAX_RETRIES} attempts")
 
     def is_api_healthy(self) -> bool:
         """Check if the API is healthy based on recent errors and successful requests."""
@@ -255,8 +280,9 @@ class ActronApi:
                 return response
             except ApiError as e:
                 if (attempt < MAX_RETRIES - 1) and (e.status_code in [500, 502, 503, 504]):
-                    _LOGGER.warning(f"Received {e.status_code} error, retrying (attempt {attempt + 1}/{MAX_RETRIES})")
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    wait_time = 2 ** attempt  # exponential backoff
+                    _LOGGER.warning(f"Received {e.status_code} error, retrying in {wait_time} seconds (attempt {attempt + 1}/{MAX_RETRIES})")
+                    await asyncio.sleep(wait_time)
                 else:
                     raise
             except Exception as err:
@@ -266,28 +292,29 @@ class ActronApi:
 
         raise ApiError(f"Failed to send command after {MAX_RETRIES} attempts")
 
+    async def get_zone_statuses(self) -> List[bool]:
+        """Get the current status of all zones."""
+        status = await self.get_ac_status(self.actron_serial)
+        return status['lastKnownState']['UserAirconSettings']['EnabledZones']
+
     async def set_zone_state(self, zone_index: int, enable: bool) -> None:
         """Set the state of a specific zone."""
-        current_zone_status = self.cached_status['main'].get('EnabledZones', [])
-        command = {
-            'command': {
-                'UserAirconSettings.EnabledZones': self._modified_zone_statuses(enable, zone_index, current_zone_status),
-                'type': 'set-settings'
-            }
-        }
+        current_zone_status = await self.get_zone_statuses()
+        modified_statuses = current_zone_status.copy()
+        modified_statuses[zone_index] = enable
+        command = self.create_command("SET_ZONE_STATE", zones=modified_statuses)
         await self.send_command(self.actron_serial, command)
 
-    def _modified_zone_statuses(self, status: bool, zone_index: int, current_zone_status: List[bool]) -> List[bool]:
-        """Modify the zone statuses list for a specific zone."""
-        modified_statuses = current_zone_status[:]
-        modified_statuses[zone_index] = status
-        return modified_statuses
+    async def set_zone_temperature(self, zone_index: int, temperature: float, is_cooling: bool) -> None:
+        """Set the temperature for a specific zone."""
+        command = self.create_command("SET_ZONE_TEMP", zone=zone_index, temp=temperature, is_cool=is_cooling)
+        await self.send_command(self.actron_serial, command)
 
     async def initializer(self):
         """Initialize the ActronApi by loading tokens and authenticating."""
         _LOGGER.debug("Initializing ActronApi")
         await self.load_tokens()
-        if not self.access_token or not self.refresh_token:
+        if not self.access_token or not self.refresh_token_value:
             _LOGGER.debug("No valid tokens found, authenticating from scratch")
             await self.authenticate()
         else:
@@ -344,18 +371,6 @@ class ActronApi:
                     "type": "set-settings"
                 }
             },
-            "ZONE_ENABLE": lambda zone_index: {
-                "command": {
-                    f"UserAirconSettings.EnabledZones[{zone_index}]": True,
-                    "type": "set-settings"
-                }
-            },
-            "ZONE_DISABLE": lambda zone_index: {
-                "command": {
-                    f"UserAirconSettings.EnabledZones[{zone_index}]": False,
-                    "type": "set-settings"
-                }
-            },
             "AWAY_MODE": lambda state: {
                 "command": {
                     "UserAirconSettings.AwayMode": state,
@@ -368,13 +383,19 @@ class ActronApi:
                     "type": "set-settings"
                 }
             },
-            "CONTINUOUS_FAN": lambda state, current_mode: {
+            "SET_ZONE_TEMP": lambda zone, temp, temp_key: {
                 "command": {
-                    "UserAirconSettings.FanMode": f"{current_mode}-CONT" if state else current_mode,
+                    f"RemoteZoneInfo[{zone}].{temp_key}": temp,
                     "type": "set-settings"
                 }
             },
-        }
+            "SET_ZONE_STATE": lambda zones: {
+                "command": {
+                    "UserAirconSettings.EnabledZones": zones,
+                    "type": "set-settings"
+                }
+            },
+        }    
         return commands[command_type](**params)
 
     async def set_climate_mode(self, mode: str) -> None:
@@ -382,8 +403,10 @@ class ActronApi:
         command = self.create_command("CLIMATE_MODE", mode=mode)
         await self.send_command(self.actron_serial, command)
 
-    async def set_fan_mode(self, mode: str) -> None:
+    async def set_fan_mode(self, mode: str, continuous: bool = False) -> None:
         """Set the fan mode."""
+        if continuous:
+            mode += "-CONT"
         command = self.create_command("FAN_MODE", mode=mode)
         await self.send_command(self.actron_serial, command)
 
@@ -400,9 +423,4 @@ class ActronApi:
     async def set_quiet_mode(self, state: bool) -> None:
         """Set quiet mode."""
         command = self.create_command("QUIET_MODE", state=state)
-        await self.send_command(self.actron_serial, command)
-
-    async def set_continuous_fan(self, state: bool, current_mode: str) -> None:
-        """Set continuous fan mode."""
-        command = self.create_command("CONTINUOUS_FAN", state=state, current_mode=current_mode)
         await self.send_command(self.actron_serial, command)
