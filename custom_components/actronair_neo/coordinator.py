@@ -73,15 +73,29 @@ class ActronDataCoordinator(DataUpdateCoordinator):
             raise UpdateFailed(f"Unexpected error: {err}") from err
 
     def _parse_data(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Parse the data from the API into a format suitable for the climate entity."""
+        """Parse the data from the API into a format suitable for the climate entity.
+        
+        Args:
+            data: Raw API response data
+            
+        Returns:
+            Dict containing parsed data including raw data for diagnostics
+            
+        Raises:
+            UpdateFailed: If parsing fails
+        """
         try:
             last_known_state = data.get("lastKnownState", {})
             user_aircon_settings = last_known_state.get("UserAirconSettings", {})
             master_info = last_known_state.get("MasterInfo", {})
             live_aircon = last_known_state.get("LiveAircon", {})
             aircon_system = last_known_state.get("AirconSystem", {})
+            alerts = last_known_state.get("Alerts", {})
 
             parsed_data = {
+                # Store raw data for diagnostics
+                "raw_data": data,
+                
                 "main": {
                     "is_on": user_aircon_settings.get("isOn", False),
                     "mode": user_aircon_settings.get("Mode", "OFF"),
@@ -97,27 +111,70 @@ class ActronDataCoordinator(DataUpdateCoordinator):
                     "model": aircon_system.get("MasterWCModel"),
                     "serial_number": aircon_system.get("MasterSerial"),
                     "firmware_version": aircon_system.get("MasterWCFirmwareVersion"),
+                    # Add alert statuses
+                    "filter_clean_required": alerts.get("CleanFilter", False),
+                    "defrosting": alerts.get("Defrosting", False),
                 },
                 "zones": {}
             }
 
-            # Parse zone data
+            # Parse zone data with battery information
             remote_zone_info = last_known_state.get("RemoteZoneInfo", [])
+            peripherals = aircon_system.get("Peripherals", [])
+            
             for i, zone in enumerate(remote_zone_info):
                 if i < MAX_ZONES and zone.get("NV_Exists", False):
                     zone_id = f"zone_{i+1}"
-                    parsed_data["zones"][zone_id] = {
+                    zone_data = {
                         "name": zone.get("NV_Title", f"Zone {i+1}"),
                         "temp": zone.get("LiveTemp_oC"),
                         "humidity": zone.get("LiveHumidity_pc"),
                         "is_enabled": parsed_data["main"]["EnabledZones"][i] if i < len(parsed_data["main"]["EnabledZones"]) else False,
                     }
+                    
+                    # Find matching peripheral for battery info
+                    for peripheral in peripherals:
+                        if peripheral.get("ZoneAssignment", []) == [i + 1]:
+                            zone_data.update({
+                                "battery_level": peripheral.get("RemainingBatteryCapacity_pc"),
+                                "signal_strength": peripheral.get("Signal_of3"),
+                                "peripheral_type": peripheral.get("DeviceType"),
+                                "last_connection": peripheral.get("LastConnectionTime"),
+                                "connection_state": peripheral.get("ConnectionState"),
+                            })
+                            break
+                    
+                    parsed_data["zones"][zone_id] = zone_data
 
             return parsed_data
 
         except Exception as e:
-            _LOGGER.error(f"Failed to parse API response: {e}")
-            raise UpdateFailed(f"Failed to parse API response: {e}")
+            _LOGGER.error(f"Failed to parse API response: {e}", exc_info=True)
+            raise UpdateFailed(f"Failed to parse API response: {e}") from e
+
+    def get_zone_peripheral(self, zone_id: str) -> dict[str, Any] | None:
+        """Get peripheral data for a specific zone."""
+        try:
+            zone_index = int(zone_id.split('_')[1]) - 1
+            peripherals = self.data.get("raw_data", {}).get("AirconSystem", {}).get("Peripherals", [])
+            
+            for peripheral in peripherals:
+                if peripheral.get("ZoneAssignment", []) == [zone_index + 1]:
+                    return peripheral
+            
+            return None
+        except Exception as ex:
+            _LOGGER.error("Error getting peripheral data for zone %s: %s", zone_id, str(ex))
+            return None
+
+    def get_zone_last_updated(self, zone_id: str) -> str | None:
+        """Get last update time for a specific zone."""
+        try:
+            peripheral_data = self.get_zone_peripheral(zone_id)
+            return peripheral_data.get("LastConnectionTime") if peripheral_data else None
+        except Exception as ex:
+            _LOGGER.error("Error getting last update time for zone %s: %s", zone_id, str(ex))
+            return None
 
     async def set_hvac_mode(self, hvac_mode: str) -> None:
         """Set HVAC mode."""
@@ -195,16 +252,31 @@ class ActronDataCoordinator(DataUpdateCoordinator):
             _LOGGER.error(f"Failed to set zone {zone_id} temperature to {temperature}: {err}")
             raise
 
-    async def set_zone_state(self, zone_id: str, enable: bool) -> None:
-        """Set zone state."""
+    async def set_zone_state(self, zone_id: str | int, enable: bool) -> None:
+        """Set zone state.
+        Args:
+            zone_id: Either a zone ID string (e.g. 'zone_1') or direct zone index (0-7)
+            enable: True to enable zone, False to disable
+        """
         try:
-            zone_index = int(zone_id.split('_')[1]) - 1  # Convert zone_id to zero-based index
+            # Handle both string zone_id and direct integer index
+            if isinstance(zone_id, str):
+                zone_index = int(zone_id.split('_')[1]) - 1
+            else:
+                zone_index = int(zone_id)  # Direct index from switch component
+
             current_zone_status = self.last_data["main"]["EnabledZones"]
             modified_statuses = current_zone_status.copy()
-            modified_statuses[zone_index] = enable
-            command = self.api.create_command("SET_ZONE_STATE", zones=modified_statuses)
-            await self.api.send_command(self.device_id, command)
-            await self.async_request_refresh()
+            
+            # Ensure zone_index is within bounds
+            if 0 <= zone_index < len(modified_statuses):
+                modified_statuses[zone_index] = enable
+                command = self.api.create_command("SET_ZONE_STATE", zones=modified_statuses)
+                await self.api.send_command(self.device_id, command)
+                await self.async_request_refresh()
+            else:
+                raise ValueError(f"Zone index {zone_index} out of range")
+                
         except Exception as err:
             _LOGGER.error(f"Failed to set zone {zone_id} state to {'on' if enable else 'off'}: {err}")
             raise

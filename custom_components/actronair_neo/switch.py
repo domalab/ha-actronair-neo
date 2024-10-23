@@ -127,13 +127,3 @@ class ActronZoneSwitch(CoordinatorEntity, SwitchEntity):
             "model": self.coordinator.data["main"]["model"],
             "sw_version": self.coordinator.data["main"]["firmware_version"],
         }
-
-    @property
-    def extra_state_attributes(self):
-        """Return the state attributes."""
-        zone_data = self.coordinator.data['zones'][self.zone_id]
-        return {
-            ATTR_ZONE_NAME: zone_data['name'],
-            "temperature": zone_data.get('temp'),
-            "humidity": zone_data.get('humidity'),
-        }

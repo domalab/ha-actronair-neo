@@ -16,14 +16,20 @@ from .const import (
     SERVICE_FORCE_UPDATE,
     PLATFORM_CLIMATE,
     PLATFORM_SENSOR,
-    PLATFORM_SWITCH
+    PLATFORM_SWITCH,
+    PLATFORM_BINARY_SENSOR
 )
 from .coordinator import ActronDataCoordinator
 from .api import ActronApi, AuthenticationError, ApiError
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS: list[str] = [PLATFORM_CLIMATE, PLATFORM_SENSOR, PLATFORM_SWITCH]
+PLATFORMS: list[str] = [
+    PLATFORM_CLIMATE,
+    PLATFORM_SENSOR,
+    PLATFORM_SWITCH,
+    PLATFORM_BINARY_SENSOR
+]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up ActronAir Neo from a config entry."""
