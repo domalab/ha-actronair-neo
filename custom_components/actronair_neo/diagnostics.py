@@ -106,7 +106,10 @@ async def async_get_config_entry_diagnostics(
             }
         }
 
-        # Add zone information
+        # Get RemoteZoneInfo for zone capabilities
+        remote_zone_info = last_known_state.get("RemoteZoneInfo", [])
+
+        # Add zone information with enhanced capability details
         for zone_id, zone_data in coordinator.data["zones"].items():
             zone_info = {
                 "name": zone_data["name"],
@@ -116,8 +119,28 @@ async def async_get_config_entry_diagnostics(
                 "controller": {
                     "type": "Zone Temperature Sensor",
                     "status": "Enabled" if zone_data["is_enabled"] else "Disabled",
-                }
+                },
+                "capabilities": {}
             }
+
+            # Find matching RemoteZoneInfo for this zone
+            matching_zone_info = next(
+                (zone for zone in remote_zone_info 
+                if zone.get("NV_Title") == zone_data["name"]),
+                {}
+            )
+
+            # Add capability information
+            if matching_zone_info:
+                zone_info["capabilities"] = {
+                    "variable_air_volume": matching_zone_info.get("NV_VAV", False),
+                    "individual_temp_control": matching_zone_info.get("NV_ITC", False),
+                    "individual_temp_display": matching_zone_info.get("NV_ITD", False),
+                    "temperature_setpoints": {
+                        "cool": matching_zone_info.get("TemperatureSetpoint_Cool_oC"),
+                        "heat": matching_zone_info.get("TemperatureSetpoint_Heat_oC"),
+                    }
+                }
 
             # Add wireless sensor information if available
             peripheral = coordinator.get_zone_peripheral(zone_id)
