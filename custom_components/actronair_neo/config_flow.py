@@ -4,13 +4,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import voluptuous as vol
+import voluptuous as vol # type: ignore
 
-from homeassistant import config_entries
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.data_entry_flow import FlowResult
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import aiohttp_client
+from homeassistant import config_entries # type: ignore
+from homeassistant.core import HomeAssistant, callback # type: ignore
+from homeassistant.data_entry_flow import FlowResult # type: ignore
+from homeassistant.exceptions import HomeAssistantError # type: ignore
+from homeassistant.helpers import aiohttp_client # type: ignore
 
 from .api import ActronApi, AuthenticationError, ApiError
 from .const import DOMAIN, CONF_USERNAME, CONF_PASSWORD, CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL, CONF_ENABLE_ZONE_CONTROL
@@ -91,9 +91,10 @@ class ActronairNeoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options."""
 
-    def __init__(self, config_entry):
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
+        super().__init__(config_entry)
+        self._config_entry = config_entry
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -106,13 +107,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 {
                     vol.Optional(
                         CONF_REFRESH_INTERVAL,
-                        default=self.config_entry.options.get(
+                        default=self._config_entry.options.get(
                             CONF_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL
                         ),
                     ): int,
                     vol.Optional(
                         CONF_ENABLE_ZONE_CONTROL,
-                        default=self.config_entry.options.get(
+                        default=self._config_entry.options.get(
                             CONF_ENABLE_ZONE_CONTROL, False
                         ),
                     ): bool,

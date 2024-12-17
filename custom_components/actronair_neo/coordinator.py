@@ -1,13 +1,13 @@
 # ActronAir Neo Coordinator
 
 from datetime import timedelta
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict
 import logging
 
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
-from homeassistant.exceptions import ConfigEntryAuthFailed
-from homeassistant.components.climate.const import HVACMode
+from homeassistant.core import HomeAssistant # type: ignore
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed # type: ignore
+from homeassistant.exceptions import ConfigEntryAuthFailed # type: ignore
+from homeassistant.components.climate.const import HVACMode # type: ignore
 
 from .api import ActronApi, AuthenticationError, ApiError
 from .const import DOMAIN, MAX_ZONES
@@ -37,6 +37,17 @@ class ActronDataCoordinator(DataUpdateCoordinator):
         self.device_id = device_id
         self.enable_zone_control = enable_zone_control
         self.last_data = None
+        self._continuous_fan = False
+
+    @property
+    def continuous_fan(self) -> bool:
+        """Get continuous fan state."""
+        return self._continuous_fan
+
+    @continuous_fan.setter
+    def continuous_fan(self, value: bool):
+        """Set continuous fan state."""
+        self._continuous_fan = value
 
     async def set_enable_zone_control(self, enable: bool):
         """Update the enable_zone_control status."""
@@ -148,6 +159,10 @@ class ActronDataCoordinator(DataUpdateCoordinator):
 
             return parsed_data
 
+            # Update continuous fan state based on actual mode
+            fan_mode = user_aircon_settings.get("FanMode", "")
+            self._continuous_fan = fan_mode.endswith("-CONT")
+
         except Exception as e:
             _LOGGER.error(f"Failed to parse API response: {e}", exc_info=True)
             raise UpdateFailed(f"Failed to parse API response: {e}") from e
@@ -199,13 +214,20 @@ class ActronDataCoordinator(DataUpdateCoordinator):
             _LOGGER.error(f"Failed to set {'cooling' if is_cooling else 'heating'} temperature to {temperature}: {err}")
             raise
 
-    async def set_fan_mode(self, fan_mode: str, continuous: bool = False) -> None:
-        """Set fan mode."""
+    async def set_fan_mode(self, mode: str, continuous: bool = None) -> None:
+        """Set fan mode with state tracking."""
         try:
-            await self.api.set_fan_mode(fan_mode, continuous)
+            # If continuous is not specified, maintain current state
+            if continuous is None:
+                continuous = self._continuous_fan
+            else:
+                self._continuous_fan = continuous
+
+            await self.api.set_fan_mode(mode, continuous)
             await self.async_request_refresh()
+            
         except Exception as err:
-            _LOGGER.error(f"Failed to set fan mode to {fan_mode} (continuous: {continuous}): {err}")
+            _LOGGER.error(f"Failed to set fan mode {mode} (continuous={continuous}): {err}")
             raise
 
     async def set_zone_temperature(self, zone_id: str, temperature: float, temp_key: str) -> None:

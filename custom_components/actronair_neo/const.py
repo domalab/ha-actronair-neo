@@ -84,6 +84,9 @@ FAN_MEDIUM_CONT = "MED-CONT"
 FAN_HIGH_CONT = "HIGH-CONT"
 FAN_AUTO_CONT = "AUTO-CONT"
 
+# Fan mode constants
+ATTR_CONTINUOUS_FAN = "continuous_fan"
+
 # Additional attributes
 ATTR_ENABLED_ZONES = "enabled_zones"
 

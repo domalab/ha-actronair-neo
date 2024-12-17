@@ -4,26 +4,26 @@ from __future__ import annotations
 from typing import Any
 import logging
 
-from homeassistant.components.climate import (
+from homeassistant.components.climate import ( # type: ignore
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
 )
-from homeassistant.components.climate.const import (
+from homeassistant.components.climate.const import ( # type: ignore
     FAN_LOW,
     FAN_MEDIUM,
     FAN_HIGH,
     FAN_AUTO,
 )
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
+from homeassistant.config_entries import ConfigEntry # type: ignore
+from homeassistant.const import ( # type: ignore
     ATTR_TEMPERATURE,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
-from homeassistant.helpers import entity_registry as er
+from homeassistant.core import HomeAssistant # type: ignore
+from homeassistant.helpers.entity_platform import AddEntitiesCallback # type: ignore
+from homeassistant.helpers.update_coordinator import CoordinatorEntity # type: ignore
+from homeassistant.helpers import entity_registry as er # type: ignore
 
 from .const import (
     DOMAIN,
@@ -116,7 +116,9 @@ class ActronClimate(CoordinatorEntity, ClimateEntity):
     def fan_mode(self) -> str | None:
         """Return the fan setting."""
         actron_fan_mode = self.coordinator.data["main"]["fan_mode"]
-        return REVERSE_FAN_MODE_MAP.get(actron_fan_mode.split('-')[0], FAN_LOW)  # Default to FAN_LOW if not found
+        # Remove -CONT suffix for Home Assistant but preserve in extra state attributes
+        base_mode = actron_fan_mode.split('-')[0] if actron_fan_mode else "LOW"
+        return REVERSE_FAN_MODE_MAP.get(base_mode, FAN_LOW)
 
     @property
     def current_humidity(self) -> int | None:
@@ -148,9 +150,8 @@ class ActronClimate(CoordinatorEntity, ClimateEntity):
     async def async_set_fan_mode(self, fan_mode: str) -> None:
         """Set new target fan mode."""
         actron_fan_mode = FAN_MODE_MAP.get(fan_mode, "LOW")  # Default to LOW if not found
-        current_fan_mode = self.coordinator.data["main"]["fan_mode"]
-        continuous = current_fan_mode.endswith("-CONT")
-        await self.coordinator.set_fan_mode(actron_fan_mode, continuous)
+        # Use coordinator's tracked state
+        await self.coordinator.set_fan_mode(actron_fan_mode)
 
     async def async_turn_on(self) -> None:
         """Turn the entity on."""

@@ -3,13 +3,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.components.switch import SwitchEntity # type: ignore
+from homeassistant.config_entries import ConfigEntry # type: ignore
+from homeassistant.core import HomeAssistant # type: ignore
+from homeassistant.helpers.entity_platform import AddEntitiesCallback # type: ignore
+from homeassistant.helpers.update_coordinator import CoordinatorEntity # type: ignore
 
-from .const import DOMAIN, ATTR_ZONE_NAME, ICON_ZONE
+from .const import DOMAIN, ICON_ZONE
 from .coordinator import ActronDataCoordinator
 
 async def async_setup_entry(
@@ -23,6 +23,7 @@ async def async_setup_entry(
     entities = [
         ActronAwayModeSwitch(coordinator),
         ActronQuietModeSwitch(coordinator),
+        ActronContinuousFanSwitch(coordinator),
     ]
 
     # Add zone switches
@@ -58,6 +59,7 @@ class ActronAwayModeSwitch(ActronBaseSwitch):
     def __init__(self, coordinator: ActronDataCoordinator) -> None:
         """Initialize the away mode switch."""
         super().__init__(coordinator, "away_mode")
+        self._attr_icon = "mdi:home-export-outline"
 
     @property
     def is_on(self) -> bool:
@@ -78,6 +80,7 @@ class ActronQuietModeSwitch(ActronBaseSwitch):
     def __init__(self, coordinator: ActronDataCoordinator) -> None:
         """Initialize the quiet mode switch."""
         super().__init__(coordinator, "quiet_mode")
+        self._attr_icon = "mdi:volume-mute"
 
     @property
     def is_on(self) -> bool:
@@ -91,6 +94,39 @@ class ActronQuietModeSwitch(ActronBaseSwitch):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the switch off."""
         await self.coordinator.set_quiet_mode(False)
+
+class ActronContinuousFanSwitch(ActronBaseSwitch):
+    """Representation of an ActronAir Neo Continuous Fan Mode switch."""
+
+    def __init__(self, coordinator: ActronDataCoordinator) -> None:
+        """Initialize the continuous fan mode switch."""
+        super().__init__(coordinator, "continuous_fan")
+        self._attr_name = "ActronAir Neo Continuous Fan"
+        self._attr_icon = "mdi:fan-clock"
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if continuous fan mode is on."""
+        return self.coordinator.continuous_fan
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Turn the switch on."""
+        current_mode = self.coordinator.data["main"]["fan_mode"].split("-")[0]
+        self.coordinator.continuous_fan = True
+        await self.coordinator.set_fan_mode(current_mode, True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Turn the switch off."""
+        current_mode = self.coordinator.data["main"]["fan_mode"].split("-")[0]
+        self.coordinator.continuous_fan = False
+        await self.coordinator.set_fan_mode(current_mode, False)
+
+    async def async_update(self) -> None:
+        """Update the switch state from coordinator."""
+        await super().async_update()
+        # Update coordinator state based on actual AC state
+        fan_mode = self.coordinator.data["main"]["fan_mode"]
+        self.coordinator.continuous_fan = fan_mode.endswith("-CONT") if fan_mode else False
 
 class ActronZoneSwitch(CoordinatorEntity, SwitchEntity):
     """Representation of an Actron Neo Zone switch."""
